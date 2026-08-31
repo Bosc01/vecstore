@@ -1,9 +1,8 @@
 import time
-import statistics
-import random
-import math
 from dataclasses import dataclass, field
 from typing import Callable
+
+import numpy as np
 
 
 @dataclass
@@ -20,14 +19,18 @@ class BenchmarkResult:
     max_ms: float = 0.0
 
     def compute(self) -> "BenchmarkResult":
-        sorted_latencies = sorted(self.latencies_ms)
-        n = len(sorted_latencies)
-        self.p50_ms = sorted_latencies[int(n * 0.50)]
-        self.p95_ms = sorted_latencies[int(n * 0.95)]
-        self.p99_ms = sorted_latencies[int(n * 0.99)]
-        self.mean_ms = statistics.mean(sorted_latencies)
-        self.min_ms = sorted_latencies[0]
-        self.max_ms = sorted_latencies[-1]
+        if not self.latencies_ms:
+            # no queries ran; NaN keeps "unknown" distinct from "0 ms"
+            self.p50_ms = self.p95_ms = self.p99_ms = float("nan")
+            self.mean_ms = self.min_ms = self.max_ms = float("nan")
+            return self
+        lat = np.asarray(self.latencies_ms)
+        self.p50_ms = float(np.percentile(lat, 50))
+        self.p95_ms = float(np.percentile(lat, 95))
+        self.p99_ms = float(np.percentile(lat, 99))
+        self.mean_ms = float(lat.mean())
+        self.min_ms = float(lat.min())
+        self.max_ms = float(lat.max())
         return self
 
     def __str__(self) -> str:
@@ -41,18 +44,17 @@ class BenchmarkResult:
         )
 
 
-def generate_random_vectors(n: int, dim: int, seed: int = 42) -> list[list[float]]:
-    random.seed(seed)
-    vectors = []
-    for _ in range(n):
-        v = [random.gauss(0, 1) for _ in range(dim)]
-        mag = math.sqrt(sum(x * x for x in v))
-        v = [x / mag for x in v]
-        vectors.append(v)
+def generate_random_vectors(n: int, dim: int, seed: int = 42) -> np.ndarray:
+    # vectorized: the old per-component random.gauss loop was 128M interpreter
+    # calls for a 1M x 128 corpus, and reseeding the global random module here
+    # coupled every other consumer of it to corpus generation
+    rng = np.random.default_rng(seed)
+    vectors = rng.standard_normal((n, dim)).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
     return vectors
 
 
-def time_queries(search_fn: Callable, queries: list[list[float]], top_k: int = 10) -> list[float]:
+def time_queries(search_fn: Callable, queries, top_k: int = 10) -> list[float]:
     latencies = []
     for query in queries:
         start = time.perf_counter()
@@ -62,7 +64,7 @@ def time_queries(search_fn: Callable, queries: list[list[float]], top_k: int = 1
     return latencies
 
 
-def run_benchmark(label, build_fn, search_fn, corpus_size, dim=128, num_queries=200, top_k=10, seed=42):
+def run_benchmark(label, build_fn, search_fn, corpus_size, dim=128, num_queries=2000, top_k=10, seed=42):
     corpus = generate_random_vectors(corpus_size, dim, seed=seed)
     queries = generate_random_vectors(num_queries, dim, seed=seed + 9999)
     build_fn(corpus)
